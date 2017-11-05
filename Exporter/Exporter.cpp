@@ -6,6 +6,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 
+// Code for retrieving a DLL's exported names is largely adapted from the 
+// Detours software package, specifically modules.cpp/DetourEnumerateExports
+// https://www.microsoft.com/en-us/research/project/detours/
+
 namespace
 {
 
