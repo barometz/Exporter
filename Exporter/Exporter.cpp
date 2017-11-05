@@ -12,90 +12,90 @@ namespace
 std::string GetLastErrorText()
 {
   // Borrowed from https://msdn.microsoft.com/en-us/library/ms680582(v=vs.85).aspx
-  LPVOID lpMsgBuf = nullptr;
-  DWORD dw = GetLastError();
+  LPTSTR messageBuffer = nullptr;
+  DWORD errorCode = GetLastError();
 
   FormatMessage(
     FORMAT_MESSAGE_ALLOCATE_BUFFER |
     FORMAT_MESSAGE_FROM_SYSTEM |
     FORMAT_MESSAGE_IGNORE_INSERTS,
     NULL,
-    dw,
+    errorCode,
     MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-    reinterpret_cast<LPTSTR>(&lpMsgBuf),
+    reinterpret_cast<LPTSTR>(&messageBuffer),
     0, NULL);
 
-  std::string resultingMessage(reinterpret_cast<LPTSTR>(lpMsgBuf));
-  LocalFree(lpMsgBuf);
+  std::string result(messageBuffer);
+  LocalFree(messageBuffer);
 
-  return resultingMessage;
+  return result;
 }
 
-static inline PBYTE RvaAdjust(_Pre_notnull_ PIMAGE_DOS_HEADER pDosHeader, _In_ DWORD raddr)
+const BYTE* RvaAdjust(const IMAGE_DOS_HEADER* dosHeader, DWORD raddr)
 {
-  if (raddr != NULL) {
-    return ((PBYTE)pDosHeader) + raddr;
+  if (raddr)
+  {
+    const BYTE* byteHeaderAddress = reinterpret_cast<const BYTE*>(dosHeader);
+    return byteHeaderAddress + raddr;
   }
-  return NULL;
+  else
+  {
+    return nullptr;
+  }
 }
 
-std::vector<std::string> DoTheThing(const std::string& fileName)
+HINSTANCE GetLibraryHandle(const std::string& fileName)
 {
-  std::vector<std::string> result;
-
   HINSTANCE instance = LoadLibraryEx(fileName.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
+
   if (instance == nullptr)
   {
     std::stringstream stream;
-    stream << "Unable to load " << fileName << ". Message: " << GetLastErrorText();
+    stream << "Unable to load " << fileName << ": " << GetLastErrorText();
     throw std::runtime_error(stream.str());
   }
 
-  PIMAGE_DOS_HEADER pDosHeader = (PIMAGE_DOS_HEADER)instance;
-  PIMAGE_NT_HEADERS pNtHeader = (PIMAGE_NT_HEADERS)((PBYTE)pDosHeader + pDosHeader->e_lfanew);
-  PIMAGE_EXPORT_DIRECTORY pExportDir
-    = (PIMAGE_EXPORT_DIRECTORY)
-    RvaAdjust(pDosHeader,
-      pNtHeader->OptionalHeader
-      .DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+  return instance;
+}
 
-  if (!pExportDir)
-    return {};
+const IMAGE_EXPORT_DIRECTORY* GetExportDirectory(const IMAGE_DOS_HEADER* dosHeader)
+{
+  const IMAGE_NT_HEADERS* ntHeader = 
+    reinterpret_cast<const IMAGE_NT_HEADERS*>(RvaAdjust(dosHeader, dosHeader->e_lfanew));
+  const IMAGE_DATA_DIRECTORY* directory = ntHeader->OptionalHeader.DataDirectory;
+  const DWORD exportsOffset = directory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+  const IMAGE_EXPORT_DIRECTORY* exportDirectory = 
+    reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(RvaAdjust(dosHeader, exportsOffset));
 
-  PBYTE pExportDirEnd = (PBYTE)pExportDir + pNtHeader->OptionalHeader
-    .DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size;
-  PDWORD pdwFunctions = (PDWORD)RvaAdjust(pDosHeader, pExportDir->AddressOfFunctions);
-  PDWORD pdwNames = (PDWORD)RvaAdjust(pDosHeader, pExportDir->AddressOfNames);
-  PWORD pwOrdinals = (PWORD)RvaAdjust(pDosHeader, pExportDir->AddressOfNameOrdinals);
-
-  for (DWORD nFunc = 0; nFunc < pExportDir->NumberOfFunctions; nFunc++) {
-    PBYTE pbCode = (pdwFunctions != NULL)
-      ? (PBYTE)RvaAdjust(pDosHeader, pdwFunctions[nFunc]) : NULL;
-    PCHAR pszName = NULL;
-
-    // if the pointer is in the export region, then it is a forwarder.
-    if (pbCode >(PBYTE)pExportDir && pbCode < pExportDirEnd) {
-      pbCode = NULL;
-    }
-
-    for (DWORD n = 0; n < pExportDir->NumberOfNames; n++) {
-      if (pwOrdinals[n] == nFunc) {
-        pszName = (pdwNames != NULL)
-          ? (PCHAR)RvaAdjust(pDosHeader, pdwNames[n]) : NULL;
-        break;
-      }
-    }
-    ULONG nOrdinal = pExportDir->Base + nFunc;
-
-    result.push_back(std::string(pszName));
-  }
-
-  return result;
+  return exportDirectory;
 }
 
 }
 
 std::vector<std::string> Exporter::GetDllExports(const std::string& fileName)
 {
-  return DoTheThing(fileName);
+  std::vector<std::string> result;
+
+  const DWORD* nameOffsets = nullptr;
+  HINSTANCE instance = GetLibraryHandle(fileName);
+  const IMAGE_DOS_HEADER* dosHeader = reinterpret_cast<IMAGE_DOS_HEADER*>(instance);
+  const IMAGE_EXPORT_DIRECTORY* exportDirectory = GetExportDirectory(dosHeader);
+
+  if (exportDirectory)
+    nameOffsets = (DWORD*)RvaAdjust(dosHeader, exportDirectory->AddressOfNames);
+
+  if (nameOffsets)
+  {
+    const DWORD* end = nameOffsets + exportDirectory->NumberOfNames;
+    for (const DWORD* offset = nameOffsets; offset < end; ++offset)
+    {
+      const CHAR* name = reinterpret_cast<const CHAR*>(RvaAdjust(dosHeader, *offset));
+      if (name)
+        result.push_back(std::string(name));
+    }
+  }
+
+  FreeLibrary(instance);
+
+  return result;
 }
